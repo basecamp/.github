@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
       models: read
     outputs:
       label: ${{ steps.validate.outputs.label }}
@@ -33,8 +34,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PROMPT_FILE: ${{ inputs.prompt-file }}
           DIFF_MAX_BYTES: ${{ inputs.diff-max-bytes }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          PR=${{ github.event.pull_request.number }}
           gh pr diff "$PR" > /tmp/pr.diff
           gh pr view "$PR" --json title --jq .title > /tmp/pr-title.txt
           gh pr view "$PR" --json body --jq '.body // ""' > /tmp/pr-body.txt
@@ -96,7 +97,13 @@ jobs:
             echo "::warning::Model response file is missing; skipping classification."
             exit 0
           fi
-          LABEL=$(cat "$RESPONSE_FILE" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          # Handle both JSON object ({"label":"bug"}) and plain text responses
+          RAW=$(cat "$RESPONSE_FILE")
+          LABEL=$(printf '%s' "$RAW" | jq -r '.label // empty' 2>/dev/null || true)
+          if [ -z "$LABEL" ]; then
+            LABEL=$(printf '%s' "$RAW" | tr -d '[:space:]')
+          fi
+          LABEL=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
           IFS=',' read -ra ALLOWED <<< "$LABELS"
           for L in "${ALLOWED[@]}"; do
             if [ "$LABEL" = "$L" ]; then
@@ -120,9 +127,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABEL: ${{ needs.infer.outputs.label }}
           LABELS: ${{ inputs.labels }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
-          PR=${{ github.event.pull_request.number }}
-          REPO="${{ github.repository }}"
           CURRENT=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
           IFS=',' read -ra ALL_LABELS <<< "$LABELS"
           for L in "${ALL_LABELS[@]}"; do

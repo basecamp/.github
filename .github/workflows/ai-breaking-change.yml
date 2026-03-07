@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
       models: read
     outputs:
       skip: ${{ steps.filter.outputs.skip }}
@@ -40,8 +41,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FILE_PATTERNS: ${{ inputs.file-patterns }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          PR=${{ github.event.pull_request.number }}
           gh pr diff "$PR" > /tmp/full.diff
 
           python3 << 'FILTER'
@@ -70,8 +71,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PROMPT_FILE: ${{ inputs.prompt-file }}
           DIFF_MAX_BYTES: ${{ inputs.diff-max-bytes }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          PR=${{ github.event.pull_request.number }}
           TITLE=$(gh pr view "$PR" --json title --jq .title)
 
           {
@@ -164,10 +165,9 @@ jobs:
           BREAKING: ${{ needs.infer.outputs.breaking }}
           ITEMS_JSON: ${{ needs.infer.outputs.items }}
           LABEL: ${{ inputs.label }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
-          PR=${{ github.event.pull_request.number }}
-          REPO="${{ github.repository }}"
-
           if [ "$BREAKING" = "true" ]; then
             gh label create "$LABEL" --color "B60205" --repo "$REPO" 2>/dev/null || true
             gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL"
