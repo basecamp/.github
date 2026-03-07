@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
       models: read
     outputs:
       label: ${{ steps.validate.outputs.label }}
@@ -96,7 +97,13 @@ jobs:
             echo "::warning::Model response file is missing; skipping classification."
             exit 0
           fi
-          LABEL=$(cat "$RESPONSE_FILE" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          # Handle both JSON object ({"label":"bug"}) and plain text responses
+          RAW=$(cat "$RESPONSE_FILE")
+          LABEL=$(printf '%s' "$RAW" | jq -r '.label // empty' 2>/dev/null || true)
+          if [ -z "$LABEL" ]; then
+            LABEL=$(printf '%s' "$RAW" | tr -d '[:space:]')
+          fi
+          LABEL=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]')
           IFS=',' read -ra ALLOWED <<< "$LABELS"
           for L in "${ALLOWED[@]}"; do
             if [ "$LABEL" = "$L" ]; then
