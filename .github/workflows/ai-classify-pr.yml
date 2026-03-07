@@ -33,8 +33,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PROMPT_FILE: ${{ inputs.prompt-file }}
           DIFF_MAX_BYTES: ${{ inputs.diff-max-bytes }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          PR=${{ github.event.pull_request.number }}
           gh pr diff "$PR" > /tmp/pr.diff
           gh pr view "$PR" --json title --jq .title > /tmp/pr-title.txt
           gh pr view "$PR" --json body --jq '.body // ""' > /tmp/pr-body.txt
@@ -120,9 +120,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABEL: ${{ needs.infer.outputs.label }}
           LABELS: ${{ inputs.labels }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
-          PR=${{ github.event.pull_request.number }}
-          REPO="${{ github.repository }}"
           CURRENT=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
           IFS=',' read -ra ALL_LABELS <<< "$LABELS"
           for L in "${ALL_LABELS[@]}"; do
