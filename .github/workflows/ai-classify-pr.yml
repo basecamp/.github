@@ -1,0 +1,135 @@
+name: Classify PR
+
+on:
+  workflow_call:
+    inputs:
+      prompt-file:
+        required: true
+        type: string
+        description: Path to the classify prompt YAML in the caller repo
+      labels:
+        required: true
+        type: string
+        description: Comma-separated valid labels (e.g. "bug,enhancement,documentation")
+      diff-max-bytes:
+        required: false
+        type: number
+        default: 100000
+        description: Maximum bytes of diff to include in the prompt
+
+jobs:
+  infer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      models: read
+    outputs:
+      label: ${{ steps.validate.outputs.label }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build prompt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROMPT_FILE: ${{ inputs.prompt-file }}
+          DIFF_MAX_BYTES: ${{ inputs.diff-max-bytes }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          gh pr diff "$PR" > /tmp/pr.diff
+          gh pr view "$PR" --json title --jq .title > /tmp/pr-title.txt
+          gh pr view "$PR" --json body --jq '.body // ""' > /tmp/pr-body.txt
+
+          {
+            printf 'PR #%s: %s\n' "$PR" "$(cat /tmp/pr-title.txt)"
+            echo ""
+            cat /tmp/pr-body.txt
+            echo ""
+            echo "Diff (truncated):"
+            head -c "$DIFF_MAX_BYTES" /tmp/pr.diff
+          } > /tmp/user-message.txt
+
+          python3 << 'SPLICE'
+          import os
+          prompt_file = os.environ['PROMPT_FILE']
+          with open(prompt_file) as f:
+              lines = f.readlines()
+          with open('/tmp/user-message.txt') as f:
+              user_msg = f.read()
+
+          insert_at = len(lines)
+          for i, line in enumerate(lines):
+              if i == 0:
+                  continue
+              if line.strip() and not line[0].isspace():
+                  insert_at = i
+                  break
+
+          entry = ['  - role: user\n', '    content: |\n']
+          for ln in user_msg.splitlines():
+              entry.append('      ' + ln + '\n')
+
+          lines[insert_at:insert_at] = entry
+          with open('/tmp/prompt.yml', 'w') as f:
+              f.writelines(lines)
+
+          try:
+              import yaml
+              doc = yaml.safe_load(open('/tmp/prompt.yml'))
+              assert doc['messages'][-1]['role'] == 'user', 'prompt splice failed'
+          except ImportError:
+              pass
+          SPLICE
+
+      - name: Classify
+        id: classify
+        uses: actions/ai-inference@e09e65981758de8b2fdab13c2bfb7c7d5493b0b6 # v2.0.7
+        with:
+          prompt-file: /tmp/prompt.yml
+
+      - name: Validate label
+        id: validate
+        env:
+          LABELS: ${{ inputs.labels }}
+          RESPONSE_FILE: ${{ steps.classify.outputs.response-file }}
+        run: |
+          if [ -z "$RESPONSE_FILE" ] || [ ! -f "$RESPONSE_FILE" ]; then
+            echo "::warning::Model response file is missing; skipping classification."
+            exit 0
+          fi
+          LABEL=$(cat "$RESPONSE_FILE" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+          IFS=',' read -ra ALLOWED <<< "$LABELS"
+          for L in "${ALLOWED[@]}"; do
+            if [ "$LABEL" = "$L" ]; then
+              echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "::warning::Unexpected label '$LABEL' not in allowed list; skipping."
+
+  apply:
+    runs-on: ubuntu-latest
+    needs: infer
+    if: needs.infer.outputs.label != ''
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Apply label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LABEL: ${{ needs.infer.outputs.label }}
+          LABELS: ${{ inputs.labels }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          REPO="${{ github.repository }}"
+          CURRENT=$(gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name')
+          IFS=',' read -ra ALL_LABELS <<< "$LABELS"
+          for L in "${ALL_LABELS[@]}"; do
+            if [ "$L" != "$LABEL" ] && echo "$CURRENT" | grep -qx "$L"; then
+              gh pr edit "$PR" --repo "$REPO" --remove-label "$L" 2>/dev/null || true
+            fi
+          done
+          if ! echo "$CURRENT" | grep -qx "$LABEL"; then
+            gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL" 2>/dev/null || true
+          fi
