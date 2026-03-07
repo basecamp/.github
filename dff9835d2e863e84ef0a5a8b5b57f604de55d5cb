@@ -1,0 +1,25 @@
+.github/workflows/ai-breaking-change.yml
+  165812755f1f6651 43,73,167-168
+.github/workflows/ai-classify-pr.yml
+  165812755f1f6651 36,123-124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "dff9835d2e863e84ef0a5a8b5b57f604de55d5cb",
+  "prompts": {
+    "165812755f1f6651": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "53851ff7-25d6-4cc9-8bcd-36a4a307b96f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jeremy Daer <jeremydaer@gmail.com>",
+      "messages": [],
+      "total_additions": 7,
+      "total_deletions": 8,
+      "accepted_lines": 7,
+      "overriden_lines": 0
+    }
+  }
+}
