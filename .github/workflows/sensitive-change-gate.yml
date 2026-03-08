@@ -1,0 +1,132 @@
+name: Sensitive Change Gate
+
+on:
+  workflow_call:
+    inputs:
+      extra-patterns:
+        required: false
+        type: string
+        default: ""
+        description: |
+          Additional sensitive path prefixes, one per line.
+          Merged with the built-in control-plane patterns.
+      mode:
+        required: false
+        type: string
+        default: shadow
+        description: "shadow (report only) or active (block without override)"
+
+jobs:
+  detect:
+    name: Detect sensitive changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Get changed files
+        id: files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' > /tmp/changed.txt
+          echo "Changed files:"
+          cat /tmp/changed.txt
+
+      - name: Match sensitive paths
+        id: match
+        env:
+          EXTRA_PATTERNS: ${{ inputs.extra-patterns }}
+        run: |
+          # Built-in control-plane patterns (prefix match)
+          printf '%s\n' \
+            '.github/workflows/' \
+            '.github/CODEOWNERS' \
+            '.goreleaser.yaml' \
+            '.goreleaser.yml' \
+            > /tmp/patterns.txt
+
+          # Append caller-supplied extra patterns
+          if [ -n "$EXTRA_PATTERNS" ]; then
+            printf '%s\n' "$EXTRA_PATTERNS" >> /tmp/patterns.txt
+          fi
+
+          sensitive=false
+          : > /tmp/sensitive.md
+
+          while IFS= read -r file; do
+            while IFS= read -r pattern; do
+              [ -z "$pattern" ] && continue
+              case "$file" in
+                "$pattern"*)
+                  sensitive=true
+                  echo "- \`${file}\`" >> /tmp/sensitive.md
+                  break
+                  ;;
+              esac
+            done < /tmp/patterns.txt
+          done < /tmp/changed.txt
+
+          echo "sensitive=$sensitive" >> "$GITHUB_OUTPUT"
+          if [ "$sensitive" = "true" ]; then
+            echo "::warning::Control-plane files modified"
+            cat /tmp/sensitive.md
+          fi
+
+      - name: Report
+        if: steps.match.outputs.sensitive == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          FILES=$(cat /tmp/sensitive.md)
+          MARKER="<!-- sensitive-change-gate -->"
+
+          if [ "$MODE" = "shadow" ]; then
+            HEADER="Sensitive Change Detection (shadow mode)"
+            FOOTER='> **Shadow mode** — this check is informational only. When activated, changes to these paths will require approval from a maintainer.'
+          else
+            HEADER="Sensitive Change Detection"
+            FOOTER='> Changes to control-plane files require approval from a maintainer. Add the `sensitive-change-approved` label to proceed.'
+          fi
+
+          BODY="${MARKER}
+          ### ${HEADER}
+
+          This PR modifies control-plane files:
+
+          ${FILES}
+
+          ${FOOTER}"
+
+          # Deduplicate: update existing comment or create new one.
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq "[.[] | select(.body | startswith(\"$MARKER\"))][0].id // empty" 2>/dev/null || true)
+
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -f body="$BODY" >/dev/null
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+          fi
+
+      - name: Enforce (active mode only)
+        if: steps.match.outputs.sensitive == 'true' && inputs.mode == 'active'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          has_label=$(gh pr view "$PR" --repo "$REPO" --json labels \
+            --jq '[.labels[].name] | any(. == "sensitive-change-approved")' 2>/dev/null || echo "false")
+
+          if [ "$has_label" = "true" ]; then
+            echo "Override label present — allowing."
+            exit 0
+          fi
+
+          echo "::error::Control-plane files modified without override label."
+          exit 1

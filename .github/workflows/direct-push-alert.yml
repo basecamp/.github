@@ -1,0 +1,52 @@
+name: Direct Push Alert
+
+on:
+  workflow_call:
+
+jobs:
+  check:
+    name: Detect direct push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check for direct push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          REF: ${{ github.ref_name }}
+        run: |
+          # A commit pushed via PR merge is associated with the PR.
+          # Direct pushes have no associated PR.
+          pr_count=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq 'length' 2>/dev/null || echo "0")
+
+          if [ "$pr_count" -gt 0 ]; then
+            echo "Push associated with PR merge — no alert."
+            exit 0
+          fi
+
+          echo "::error::Direct push to $REF by $ACTOR ($SHA)"
+
+          TITLE="Direct push to $REF detected"
+          BODY="**Actor:** \`$ACTOR\`
+          **Branch:** \`$REF\`
+          **Commit:** [$SHA](https://github.com/$REPO/commit/$SHA)
+          **Time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          This commit was pushed directly to the default branch without going through a pull request."
+
+          # Dedup: append to existing open issue or create a new one.
+          existing=$(gh issue list --repo "$REPO" --state open \
+            --search "in:title \"Direct push to $REF\"" \
+            --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty" 2>/dev/null || true)
+
+          if [ -n "$existing" ]; then
+            gh issue comment --repo "$REPO" "$existing" --body "$BODY"
+            echo "Appended to issue #$existing"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"
+          fi
