@@ -1,0 +1,25 @@
+.github/workflows/sensitive-change-gate.yml
+  165812755f1f6651 1-132
+.github/workflows/direct-push-alert.yml
+  165812755f1f6651 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "dd8d3f5d50e2bfc806ea33b45626e63317358c3d",
+  "prompts": {
+    "165812755f1f6651": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "53851ff7-25d6-4cc9-8bcd-36a4a307b96f",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Jeremy Daer <jeremy@37signals.com>",
+      "messages": [],
+      "total_additions": 222,
+      "total_deletions": 38,
+      "accepted_lines": 184,
+      "overriden_lines": 0
+    }
+  }
+}
