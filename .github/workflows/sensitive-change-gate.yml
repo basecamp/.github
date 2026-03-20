@@ -91,6 +91,7 @@ jobs:
             FOOTER='> **Shadow mode** — this check is informational only. When activated, changes to these paths will require approval from a maintainer.'
           else
             HEADER="Sensitive Change Detection"
+            # shellcheck disable=SC2016
             FOOTER='> Changes to control-plane files require approval from a maintainer. Add the `sensitive-change-approved` label to proceed.'
           fi
 
