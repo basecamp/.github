@@ -34,7 +34,7 @@ jobs:
       breaking: ${{ steps.parse.outputs.breaking }}
       items: ${{ steps.parse.outputs.items }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
@@ -119,7 +119,7 @@ jobs:
       - name: Detect breaking changes
         if: steps.filter.outputs.skip != 'true'
         id: detect
-        uses: actions/ai-inference@e09e65981758de8b2fdab13c2bfb7c7d5493b0b6 # v2.0.7
+        uses: actions/ai-inference@a7805884c80886efc241e94a5351df715968a0ad # v2.1.1
         with:
           prompt-file: /tmp/prompt.yml
 
