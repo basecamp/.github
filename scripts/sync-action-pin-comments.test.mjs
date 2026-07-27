@@ -227,6 +227,31 @@ describe("assertOnlyTokensChanged", () => {
   });
 });
 
+describe("build metadata (semver §10)", () => {
+  it("indexes tags with build metadata and accepts them as comment tokens", () => {
+    const out = [`${CHECKOUT_SHA}\trefs/tags/v1.2.3+build.1`].join("\n");
+    const map = parseLsRemoteOutput(out);
+    assert.deepEqual(map.get(CHECKOUT_SHA), ["v1.2.3+build.1"]);
+  });
+
+  it("repairs a stale comment to a build-metadata tag when it is the only tag", () => {
+    const files = [{ path: "ci.yml", content: `      - uses: actions/checkout@${CHECKOUT_SHA} # v1.0.0\n` }];
+    const tagIndex = index({ "actions/checkout": { [CHECKOUT_SHA]: ["v1.2.3+build.1"] } });
+    const { edits, newContents } = planEdits(files, tagIndex);
+    assert.equal(edits.length, 1);
+    assertMatchObject(edits[0], { oldToken: "v1.0.0", newToken: "v1.2.3+build.1" });
+    assert.equal(newContents.get("ci.yml"), `      - uses: actions/checkout@${CHECKOUT_SHA} # v1.2.3+build.1\n`);
+  });
+
+  it("leaves a correct build-metadata comment untouched and ignores metadata for precedence", () => {
+    const files = [{ path: "ci.yml", content: `      - uses: actions/checkout@${CHECKOUT_SHA} # v1.2.3+build.1\n` }];
+    const { edits } = planEdits(files, index({ "actions/checkout": { [CHECKOUT_SHA]: ["v1.2.3+build.1"] } }));
+    assert.equal(edits.length, 0);
+    assert.equal(compareVersionTags("v1.2.3+build.1", "v1.2.3+build.2") < 0, true); // deterministic lexicographic tie-break only
+    assert.equal(chooseBestTag(["v1.2.3+build.1", "v1.2.4"]), "v1.2.4");
+  });
+});
+
 describe("collectRepoKeys", () => {
   it("collects unique sorted owner/repo keys across files", () => {
     const files = [
