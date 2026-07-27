@@ -576,8 +576,16 @@ jobs:
               --body "Automated comment-only repair: version comments on SHA-pinned \`uses:\` lines drifted from the tags their pins point at. Every action path and pin is byte-identical to the base commit — only comment tokens changed — so CI for this PR executes exactly the action versions already reviewed on \`${BASE_BRANCH}\`. Auto-merges once required checks pass."
           fi
 
-          prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$REPAIR_BRANCH" \
-            --json number,headRefOid,baseRefName,author)"
+          # The PR API can lag the just-completed branch push by a few seconds;
+          # poll until the reported head catches up before judging. Mismatch
+          # after the window still refuses to arm.
+          for _ in 1 2 3 4 5 6; do
+            prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --head "$REPAIR_BRANCH" \
+              --json number,headRefOid,baseRefName,author)"
+            [ "$(jq 'length' <<<"$prs")" = "1" ] && \
+              [ "$(jq -r '.[0].headRefOid' <<<"$prs")" = "$NEW_HEAD" ] && break
+            sleep 5
+          done
           if [ "$(jq 'length' <<<"$prs")" != "1" ]; then
             echo "::error::expected exactly one open repair PR after create/update"
             exit 1
