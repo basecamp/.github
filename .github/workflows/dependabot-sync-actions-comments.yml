@@ -38,21 +38,14 @@ on:
       ci-workflow-name:
         description: >-
           Name of the pull_request CI workflow (the one the caller's
-          workflow_run trigger names). Used to detect whether CI started on the
-          pushed head before falling back to a dispatch.
+          workflow_run trigger names). Used to verify CI started on the
+          pushed head.
         required: true
         type: string
       default-branch:
         description: The caller repository's default branch
         required: false
         default: main
-        type: string
-      dispatch-workflows:
-        description: >-
-          Space-separated workflow files to dispatch on the new head if no
-          pull_request CI run appears (fallback only)
-        required: false
-        default: test.yml security.yml
         type: string
       branch:
         description: Dependabot branch to sync (workflow_dispatch path only)
@@ -108,7 +101,7 @@ jobs:
       )
     permissions:
       contents: read # fetch the repo over https; the push itself uses the deploy key
-      actions: write # dispatch CI / approve held runs so required checks attach
+      actions: write # approve held pull_request runs so required checks attach
       pull-requests: read # `gh pr list` in the pull request gate
     env:
       GH_TOKEN: ${{ github.token }}
@@ -615,31 +608,30 @@ jobs:
           { echo "pushed=true"; echo "new_head=$(git rev-parse HEAD)"; } >> "$GITHUB_OUTPUT"
 
       # A deploy-key push fires normal pull_request synchronize events, so CI
-      # should start on its own. Dispatch the fallback workflows only if no
-      # pull_request CI run has appeared for the new head after a grace
-      # period: a fallback, not the norm.
-      - name: Dispatch CI on the new head if none started
+      # starts on its own. There is deliberately NO dispatch fallback: a
+      # workflow_dispatch run at the branch would execute the branch's own
+      # workflow definitions — the freshly bumped, unreviewed action pins —
+      # outside the Dependabot-restricted pull_request context, with whatever
+      # permissions those jobs declare. If CI ever fails to start, surface a
+      # warning for a maintainer instead of dispatching unreviewed code.
+      - name: Verify CI started on the new head
         if: steps.push.outputs.pushed == 'true'
         env:
           BRANCH: ${{ steps.target.outputs.branch }}
           NEW_HEAD: ${{ steps.push.outputs.new_head }}
           CI_NAME: ${{ inputs.ci-workflow-name }}
-          DISPATCH_WORKFLOWS: ${{ inputs.dispatch-workflows }}
         run: |
           for _ in 1 2 3 4 5 6; do
             count="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" \
               -f event=pull_request -f branch="$BRANCH" -f per_page=100 \
               --jq '[.workflow_runs[] | select(.head_sha == env.NEW_HEAD and .name == env.CI_NAME)] | length')"
             if [ "${count:-0}" -gt 0 ]; then
-              echo "::notice::CI already running for ${NEW_HEAD}; no dispatch needed"
+              echo "::notice::CI running for ${NEW_HEAD}"
               exit 0
             fi
             sleep 10
           done
-          echo "::notice::no pull_request CI run appeared for ${NEW_HEAD}; dispatching"
-          for wf in $DISPATCH_WORKFLOWS; do
-            gh workflow run "$wf" --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
-          done
+          echo "::warning::no pull_request CI run appeared for ${NEW_HEAD}; re-run checks from the PR page (dispatching branch workflows from here would execute unreviewed action pins outside the Dependabot sandbox)"
 
       # If the pushed head's pull_request runs get held for approval (repos
       # that require Actions approval for first-time contributors), a held run
