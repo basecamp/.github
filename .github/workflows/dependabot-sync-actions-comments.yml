@@ -526,7 +526,8 @@ jobs:
           if [ "$count" = "1" ]; then
             author="$(jq -r '.[0].author.login' <<<"$prs")"
             base="$(jq -r '.[0].baseRefName' <<<"$prs")"
-            if [ "$author" != "github-actions" ] || [ "$base" != "$BASE_BRANCH" ]; then
+            # gh reports bot PR creators as app/<slug>
+            if [ "$author" != "app/github-actions" ] || [ "$base" != "$BASE_BRANCH" ]; then
               echo "::error::existing ${REPAIR_BRANCH} PR is not the bot-owned repair PR (author=${author}, base=${base}); refusing to touch it"
               exit 1
             fi
@@ -585,7 +586,7 @@ jobs:
           base="$(jq -r '.[0].baseRefName' <<<"$prs")"
           author="$(jq -r '.[0].author.login' <<<"$prs")"
           num="$(jq -r '.[0].number' <<<"$prs")"
-          if [ "$oid" != "$NEW_HEAD" ] || [ "$base" != "$BASE_BRANCH" ] || [ "$author" != "github-actions" ]; then
+          if [ "$oid" != "$NEW_HEAD" ] || [ "$base" != "$BASE_BRANCH" ] || [ "$author" != "app/github-actions" ]; then
             echo "::error::repair PR does not match the proven commit (head=${oid}, base=${base}, author=${author}); not arming auto-merge"
             exit 1
           fi
