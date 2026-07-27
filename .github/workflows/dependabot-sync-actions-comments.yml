@@ -20,6 +20,7 @@ name: Sync Dependabot action pin comments
 #     workflow_run:      # needs a dangerous-triggers ignore with rationale
 #       workflows: [<name of the PR CI workflow>]
 #       types: [completed]
+#       branches: ["dependabot/github_actions/**"]   # no runs created for other branches
 #     workflow_dispatch:
 #       inputs: {branch: {type: string, required: true}, e2e: {type: boolean, default: false}}
 #   jobs:
