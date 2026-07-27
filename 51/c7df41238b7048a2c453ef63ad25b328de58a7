@@ -1,0 +1,29 @@
+scripts/sync-action-pin-comments.test.mjs
+  s_7cd130483cb0ba::t_1a6606530abb1a 1-241
+scripts/check-embedded-sync.sh
+  s_7cd130483cb0ba::t_563fe6bac3fdb4 1-20
+.github/workflows/ci.yml
+  s_7cd130483cb0ba::t_af346de33541bc 41-43
+  s_7cd130483cb0ba::t_e3319c2f7d3272 27-40
+.github/workflows/dependabot-sync-actions-comments.yml
+  s_7cd130483cb0ba::t_07166c17f3a48b 1-345,353-354
+  s_7cd130483cb0ba::t_093d4af9314aa8 346-352,355-676
+scripts/sync-action-pin-comments.mjs
+  s_7cd130483cb0ba::t_9d2c4b5b405488 1-323
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "51c7df41238b7048a2c453ef63ad25b328de58a7",
+  "prompts": {},
+  "sessions": {
+    "s_7cd130483cb0ba": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e70042f8-3788-4966-bca1-06b7839d136b",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Jeremy Daer <jeremydaer@gmail.com>"
+    }
+  }
+}
