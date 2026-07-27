@@ -34,7 +34,7 @@ name: Sync Dependabot action pin comments
 #     sync:
 #       uses: basecamp/.github/.github/workflows/dependabot-sync-actions-comments.yml@<sha>
 #       with: {default-branch: <default branch, if not main>}
-#       permissions: {contents: read, actions: write, pull-requests: write}
+#       permissions: {contents: write, actions: write, pull-requests: write}
 #       secrets: inherit
 #   plus the `dependabot-sync` environment (deployment branches: default
 #   branch only) holding SYNC_ACTIONS_DEPLOY_KEY, and the repository setting
@@ -74,7 +74,11 @@ jobs:
     # branch policy enforces the same server-side.
     if: github.ref == format('refs/heads/{0}', inputs.default-branch)
     permissions:
-      contents: read # fetch the repo over https; the push itself uses the deploy key
+      # contents: write is for enablePullRequestAutoMerge only (merging is a
+      # contents operation — same grant the dependabot-auto-merge workflows
+      # carry). The token still cannot push workflow files (App-token
+      # restriction); the repair branch push uses the deploy key.
+      contents: write
       actions: write # approve held runs on the repair PR so required checks attach
       pull-requests: write # create/update the repair PR and enable auto-merge
     env:
