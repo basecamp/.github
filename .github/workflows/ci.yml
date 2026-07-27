@@ -37,7 +37,9 @@ jobs:
           persist-credentials: false
 
       - name: Run node --test
-        run: node --test "scripts/*.test.mjs"
+        # Unquoted so the shell expands the glob — works on any Node, not just
+        # versions with built-in --test glob support.
+        run: node --test scripts/*.test.mjs
 
       - name: Check embedded updater script matches source
         run: bash scripts/check-embedded-sync.sh

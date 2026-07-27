@@ -37,7 +37,7 @@ export const PIN_LINE_RE = /^(\s*(?:-\s+)?uses:\s+)([\w.-]+\/[\w./-]+)@([0-9a-f]
 
 // Tags eligible as version comments: v-optional dotted numerics with an
 // optional prerelease suffix.
-export const TAG_RE = /^v?\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?$/;
+export const TAG_RE = /^v?\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
 const LS_REMOTE_LINE_RE = /^([0-9a-f]{40})\trefs\/tags\/([^\s^]+)(\^\{\})?$/;
 
@@ -85,8 +85,10 @@ export function parseLsRemoteOutput(output) {
 }
 
 function parseTag(tag) {
-  const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?$/.exec(tag);
+  const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(tag);
   if (!m) return null;
+  // Build metadata is ignored for precedence (semver §10); the lexicographic
+  // tie-break in compareVersionTags keeps ordering deterministic.
   const nums = [m[1], m[2], m[3]].filter((s) => s !== undefined).map(Number);
   return { nums, pre: m[4] ?? null };
 }
