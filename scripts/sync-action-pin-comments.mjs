@@ -35,8 +35,8 @@ const execFileAsync = promisify(execFile);
 // lead-in / version token / rest-of-line (verbatim, carries any annotations).
 export const PIN_LINE_RE = /^(\s*(?:-\s+)?uses:\s+)([\w.-]+\/[\w./-]+)@([0-9a-f]{40})(\s+#\s*)(v?\d[^\s#]*)(.*)$/;
 
-// Tags eligible as version comments: v-optional dotted numerics with an
-// optional prerelease suffix.
+// Tags eligible as version comments: v-optional dotted numerics with
+// optional prerelease and build-metadata suffixes (SemVer §9–10).
 export const TAG_RE = /^v?\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
 const LS_REMOTE_LINE_RE = /^([0-9a-f]{40})\trefs\/tags\/([^\s^]+)(\^\{\})?$/;
