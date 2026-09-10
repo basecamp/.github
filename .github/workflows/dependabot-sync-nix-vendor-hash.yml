@@ -11,14 +11,20 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #
 # Two jobs, deliberately on separate runners:
 #
-#   compute  contents: read, no secrets. Builds the flake at the PR's merge
-#            commit — the same thing the Nix check builds — and, only when Nix
-#            reports a fixed-output mismatch for the `*-go-modules.drv`
-#            derivation, takes the SRI hash from that diagnostic's `got:` line.
-#            A build that fails for any other reason fails this job with Nix's
-#            own output and nothing is written anywhere. (The classifier is a
-#            copy of hey-cli's scripts/extract-nix-vendor-hash.sh, whose
-#            header explains each guard; both guards are load-bearing.)
+#   compute  contents: read, no secrets. Refuses any PR whose changed files
+#            are not a subset of go.mod, go.sum and the package file — the
+#            "Go bumps only" boundary is enforced here, on the PR's actual
+#            diff, not by the caller's path filter or by who dispatched the
+#            run — and does nothing for a PR that touches neither go.mod nor
+#            go.sum. Otherwise builds the flake at the PR's merge commit — the
+#            same thing the Nix check builds — and, only when Nix reports a
+#            fixed-output mismatch for the `*-go-modules.drv` derivation,
+#            takes the SRI hash from that diagnostic's `got:` line. A build
+#            that fails for any other reason fails this job with Nix's own
+#            output and nothing is written anywhere. (The classifier is
+#            scripts/extract-nix-vendor-hash.sh, embedded below so the
+#            caller's SHA pin covers it; CI keeps the copy identical to the
+#            tested source, whose header explains each guard.)
 #
 #   push     Runs only when compute produced a hash. Mints a one-hour GitHub
 #            App installation token scoped to the calling repository with
@@ -29,6 +35,11 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #            Dependabot rebase mid-run makes the commit fail cleanly and the
 #            rebase's own run recomputes. No git credential ever touches a
 #            runner; the token exists only in this job, which runs no build.
+#            The lease covers the head only: a base branch whose go.sum moves
+#            after the build leaves this PR's checks exactly where any PR's
+#            are after its base moves — run at the merge commit of their
+#            moment — and the caller's required check, not this push, is
+#            what holds that.
 #
 # Why an App token: a GITHUB_TOKEN push does not re-trigger pull_request
 # workflows, so the required checks would never report on the new head and the
@@ -84,6 +95,25 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #   as a repository Actions secret. Environment-scoped copies (the CLIs'
 #   `release` environment) are out of reach here, by design; `vars` are not
 #   used because the CLIs keep the client id in that environment too.
+#
+# The refresh has to land before auto-merge can complete, and this workflow
+# cannot make that so on its own: GitHub auto-merge waits for required checks
+# only, and this build takes minutes. A caller does one of two things —
+#
+#   - keeps "Nix flake builds" a required status check (hey-cli): the stale
+#     head stays red until the push, and the App push, being a write-access
+#     actor's, leaves auto-merge enabled for the new head; or
+#   - sequences auto-merge after this workflow in one workflow file
+#     (basecamp-cli): the refresh job calls this workflow on every Dependabot
+#     PR (the changed-files boundary above makes non-Go bumps a no-op) and
+#     the auto-merge job `needs:` it, so `gh pr merge --auto` runs only once
+#     the hash is current or the push has landed, and never when the refresh
+#     failed. The caller then needs no `paths:` filter.
+#
+# A caller with neither merges a stale head whenever its required checks
+# finish first, as basecamp-cli #697 did; the push then lands on a closed
+# PR and main stays broken. The required check is also the only thing that
+# holds the hash against a base branch whose go.sum moves after the push.
 
 on:
   workflow_call:
@@ -143,7 +173,8 @@ jobs:
     steps:
       # Exactly one open, same-repo PR authored by the Dependabot app (gh
       # reports it as app/dependabot — distinct from the dependabot[bot] actor
-      # checked above). Its head SHA is captured once here and is both what
+      # checked above) whose changed files are a subset of go.mod, go.sum and
+      # the package file. Its head SHA is captured once here and is both what
       # the build must correspond to and the push's compare-and-swap lease.
       - name: Resolve the pull request
         id: pr
@@ -151,6 +182,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_PR: ${{ github.event.pull_request.number }}
           INPUT_PR: ${{ inputs.pr }}
+          PACKAGE_FILE: ${{ inputs.package-file }}
         run: |
           number="${EVENT_PR:-$INPUT_PR}"
           if ! printf '%s' "$number" | grep -qE '^[0-9]+$'; then
@@ -172,11 +204,35 @@ jobs:
             echo "::error::head SHA of #${number} is not a 40-hex commit id"
             exit 1
           fi
-          { echo "number=$number"; echo "head_sha=$head_sha"; echo "head_ref=$head_ref"; } >> "$GITHUB_OUTPUT"
+
+          # Go bumps only, decided by the diff itself. A PR that changes
+          # anything but go.mod, go.sum and the package file (the latter is
+          # this workflow's own earlier push, on a re-run) is refused whoever
+          # dispatched it: an actions bump's workflow code must never re-run
+          # under the App actor. One that changes neither go.mod nor go.sum
+          # has nothing to refresh and the build is skipped.
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/files" --jq '.[].filename')"
+          if [ -z "$files" ]; then
+            echo "::error::#${number} reports no changed files"
+            exit 1
+          fi
+          if printf '%s\n' "$files" | grep -qvxF -e go.mod -e go.sum -e "$PACKAGE_FILE"; then
+            echo "::error::#${number} changes files other than go.mod, go.sum and ${PACKAGE_FILE}; not a Go-only bump, refusing to refresh"
+            printf '%s\n' "$files"
+            exit 1
+          fi
+          go_bump=false
+          if printf '%s\n' "$files" | grep -qxE 'go\.(mod|sum)'; then
+            go_bump=true
+          else
+            echo "::notice::#${number} changes neither go.mod nor go.sum; nothing to refresh"
+          fi
+          { echo "number=$number"; echo "head_sha=$head_sha"; echo "head_ref=$head_ref"; echo "go_bump=$go_bump"; } >> "$GITHUB_OUTPUT"
 
       # The merge commit is what the caller's Nix check builds, so the hash
       # computed here is the one that check will accept.
       - name: Check out the merge commit
+        if: steps.pr.outputs.go_bump == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/merge
@@ -185,6 +241,7 @@ jobs:
       # GitHub refreshes refs/pull/N/merge lazily; a head that moved since
       # the PR was resolved above would be built against the wrong go.sum.
       - name: Confirm the merge commit is for the captured head
+        if: steps.pr.outputs.go_bump == 'true'
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
@@ -195,13 +252,83 @@ jobs:
           fi
 
       - name: Install Nix
+        if: steps.pr.outputs.go_bump == 'true'
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+
+      # The classifier is embedded here so the caller's SHA pin on this
+      # reusable workflow covers it byte for byte — no runtime fetch, no
+      # mutable ref. scripts/extract-nix-vendor-hash.sh in basecamp/.github is
+      # the tested source of truth; CI fails if this embedded copy drifts from
+      # it (scripts/check-embedded-sync.sh).
+      - name: Materialize the trusted classifier
+        if: steps.pr.outputs.go_bump == 'true'
+        run: |
+          cat > "$RUNNER_TEMP/extract-nix-vendor-hash.sh" <<'EXTRACT_SH'
+          #!/usr/bin/env bash
+          # Extracts the corrected vendorHash from a nix build log.
+          #
+          # Usage: scripts/extract-nix-vendor-hash.sh [LOGFILE]   (reads stdin when omitted)
+          #
+          # The classifier for "did this build fail because of the vendorHash?" behind
+          # dependabot-sync-nix-vendor-hash.yml, which embeds it so the caller's SHA
+          # pin covers it byte for byte; CI fails if the embedded copy drifts from this
+          # file (scripts/check-embedded-sync.sh), and extract-nix-vendor-hash.test.mjs
+          # holds the fixtures that are its contract. Derived from hey-cli's script of
+          # the same name.
+          #
+          # Three conditions must hold before a hash comes back. Each guard is
+          # load-bearing, because the caller writes the result into a tracked file:
+          #
+          # - Nix must have reported a fixed-output hash mismatch. Matching a bare
+          #   `got:` is far too loose: any failing build whose log happens to contain
+          #   one — a Go test assertion printing `got: 42`, say — would yield "42" and
+          #   misreport an unrelated failure as a hash problem.
+          # - That mismatch must belong to buildGoModule's vendor derivation
+          #   (`*-go-modules.drv`). A flake can carry other fixed-output derivations —
+          #   hey-cli's once fetched a Go source tarball while nixpkgs lagged go.mod —
+          #   and their hashes must never land in vendorHash. The `got:` is taken from
+          #   that one diagnostic, so a mismatch for another derivation cannot supply
+          #   the value however the two are ordered.
+          # - The value must be a complete SRI sha256: 43 base64 characters and one
+          #   `=`. A truncated or otherwise malformed value is not a hash to write.
+          #
+          # Exit codes:
+          #   0 — a go-modules fixed-output hash mismatch was reported; the SRI hash is
+          #       on stdout
+          #   1 — the log reports no such mismatch, or its value is malformed; nothing
+          #       on stdout
+
+          set -euo pipefail
+
+          LOG=$(cat -- "${1:--}")
+
+          # The mismatch diagnostic names the derivation on its own line; `specified:`
+          # and `got:` follow on the next lines. Take the first `got:` inside the
+          # go-modules block and stop there; a mismatch for any other derivation ends
+          # the block, so its `got:` can never be read as ours. (No interval regexes:
+          # Ubuntu's awk is mawk. The length check is grep's, below.)
+          HASH=$(awk '
+            /hash mismatch in fixed-output derivation .*-go-modules\.drv/ { in_block = 1; next }
+            /hash mismatch in fixed-output derivation/ { in_block = 0; next }
+            in_block && /got:/ {
+              if (match($0, /sha256-[A-Za-z0-9+\/]+=*/)) { print substr($0, RSTART, RLENGTH) }
+              exit
+            }
+          ' <<<"$LOG")
+
+          if ! printf '%s' "$HASH" | grep -qE '^sha256-[A-Za-z0-9+/]{43}=$'; then
+            exit 1
+          fi
+
+          printf '%s\n' "$HASH"
+          EXTRACT_SH
 
       # Exit paths, all explicit: a build that succeeds means the hash is
       # current and there is nothing to do; a go-modules fixed-output mismatch
       # yields the hash; anything else fails here with Nix's own diagnostics
       # and nothing downstream runs.
       - name: Build the flake and classify the failure
+        if: steps.pr.outputs.go_bump == 'true'
         id: build
         run: |
           log="$(mktemp)"
@@ -212,17 +339,7 @@ jobs:
             echo "::notice::the flake builds; vendorHash is current"
             exit 0
           fi
-          # The mismatch names its derivation on one line and `got:` on a
-          # following one. Take the first `got:` after a go-modules mismatch
-          # and stop, so another derivation's mismatch cannot supply the value.
-          hash="$(awk '
-            /hash mismatch in fixed-output derivation .*-go-modules\.drv/ { in_block = 1; next }
-            in_block && /got:/ {
-              if (match($0, /sha256-[A-Za-z0-9+\/]+=*/)) { print substr($0, RSTART, RLENGTH) }
-              exit
-            }
-          ' "$log")"
-          if ! printf '%s' "$hash" | grep -qE '^sha256-[A-Za-z0-9+/]{43}=$'; then
+          if ! hash="$(bash "$RUNNER_TEMP/extract-nix-vendor-hash.sh" "$log")"; then
             echo "::error::nix build failed, and not because of the vendorHash; nothing to refresh"
             exit "$status"
           fi
