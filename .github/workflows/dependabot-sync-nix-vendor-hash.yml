@@ -216,9 +216,10 @@ jobs:
             echo "::error::#${number} reports no changed files"
             exit 1
           fi
-          if printf '%s\n' "$files" | grep -qvxF -e go.mod -e go.sum -e "$PACKAGE_FILE"; then
+          outside="$(printf '%s\n' "$files" | grep -vxF -e go.mod -e go.sum -e "$PACKAGE_FILE" || true)"
+          if [ -n "$outside" ]; then
             echo "::error::#${number} changes files other than go.mod, go.sum and ${PACKAGE_FILE}; not a Go-only bump, refusing to refresh"
-            printf '%s\n' "$files"
+            printf '%s\n' "$outside"
             exit 1
           fi
           go_bump=false
