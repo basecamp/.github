@@ -75,13 +75,15 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #         github.event_name == 'workflow_dispatch' ||
 #         (github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]')
 #       uses: basecamp/.github/.github/workflows/dependabot-sync-nix-vendor-hash.yml@<sha>
-#       with: {pr: "${{ inputs.pr }}", app-client-id: "${{ vars.RELEASE_CLIENT_ID }}"}
+#       with: {pr: "${{ inputs.pr }}", app-client-id: <the App's client id, a public literal>}
 #       permissions: {contents: read, pull-requests: read, actions: read}
 #       secrets: {app-private-key: "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"}
 #   plus the App installed on the repository with contents: write, and its
-#   private key stored as a *Dependabot* secret (Dependabot-triggered runs do
-#   not see Actions secrets) as well as the Actions secret the dispatch path
-#   reads.
+#   private key stored as a repository *Dependabot* secret (Dependabot-
+#   triggered runs see only Dependabot secrets) and, for the dispatch path,
+#   as a repository Actions secret. Environment-scoped copies (the CLIs'
+#   `release` environment) are out of reach here, by design; `vars` are not
+#   used because the CLIs keep the client id in that environment too.
 
 on:
   workflow_call:
