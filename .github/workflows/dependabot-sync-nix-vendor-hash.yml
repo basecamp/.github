@@ -1,0 +1,477 @@
+name: Refresh the Nix vendorHash on Dependabot PRs
+
+# A Dependabot Go bump changes go.sum; the flake's `vendorHash` in
+# nix/package.nix (buildGoModule's fixed-output hash over `go mod vendor`)
+# goes stale, and the caller's "Nix flake builds" check fails with a hash
+# mismatch. Where that check is required the PR wedges until a human runs
+# `make update-nix-hash` (Docker); where it is not, auto-merge lands the PR red
+# and main's next flake build is broken until someone notices (basecamp-cli
+# #697 -> #701). This workflow refreshes the hash on the Dependabot PR itself,
+# so the PR's own Nix check goes green and main is never broken.
+#
+# Two jobs, deliberately on separate runners:
+#
+#   compute  contents: read, no secrets. Does nothing for a PR that touches
+#            neither go.mod nor go.sum (an actions or docker bump), and
+#            refuses a Go bump whose changed files are not a subset of go.mod,
+#            go.sum and the package file — the "Go bumps only" boundary is
+#            enforced here, on the PR's actual diff, not by the caller's path
+#            filter or by who dispatched the run. Otherwise builds the flake
+#            at the PR's merge commit — the
+#            same thing the Nix check builds — and, only when Nix reports a
+#            fixed-output mismatch for the `*-go-modules.drv` derivation,
+#            takes the SRI hash from that diagnostic's `got:` line. A build
+#            that fails for any other reason fails this job with Nix's own
+#            output and nothing is written anywhere. (The classifier is
+#            scripts/extract-nix-vendor-hash.sh, embedded below so the
+#            caller's SHA pin covers it; CI keeps the copy identical to the
+#            tested source, whose header explains each guard.)
+#
+#   push     Runs only when compute produced a hash. Mints a one-hour GitHub
+#            App installation token scoped to the calling repository with
+#            contents: write, rewrites exactly the `vendorHash = "..."` line of
+#            the package file, proves the diff is that one line, and commits
+#            through GraphQL createCommitOnBranch with expectedHeadOid set to
+#            the head the hash was computed for — a compare-and-swap, so a
+#            Dependabot rebase mid-run makes the commit fail cleanly and the
+#            rebase's own run recomputes. No git credential ever touches a
+#            runner; the token exists only in this job, which runs no build.
+#            The lease covers the head only. A base whose go.sum moves after
+#            the build — during it or, far more often, after this PR's checks
+#            have all run, as when two Go bumps merge on the same day — yields
+#            a hash for the old merge. That is the exposure every PR's checks
+#            have to a moving base, and no pull_request-time control holds
+#            it: required checks are not re-run when the base moves (neither
+#            caller requires up-to-date branches), and recomputing on this
+#            workflow's own push would cover only the minutes of the build.
+#            The caller's Nix job on the default branch reports it after the
+#            merge; closing it is a post-merge repair on main, the
+#            sync-actions-comments pattern, which is follow-up work.
+#
+# Why an App token: a GITHUB_TOKEN push does not re-trigger pull_request
+# workflows, so the required checks would never report on the new head and the
+# PR would wedge on a different thing. The App push is a normal push: the
+# caller's full pull_request CI, including the Nix check, runs on the new head
+# and is the verification that the refreshed hash builds.
+#
+# Actor analysis, for the reviewer who remembers why pushing into Dependabot
+# PRs was abandoned for *actions* bumps (basecamp/.github #11): after any
+# non-Dependabot push, the re-triggered runs are actored by the pusher, not
+# dependabot[bot], so they see the caller's Actions secrets instead of the
+# Dependabot sandbox. For an actions bump that means the PR's freshly bumped,
+# unreviewed workflow code runs with those secrets — unacceptable. For a Go
+# bump the workflow code that runs is the default branch's (Dependabot does not
+# touch workflows, and the commit this workflow pushes is proven to touch one
+# line of the package file); the unreviewed content is Go dependency code
+# running inside reviewed jobs, which the Test workflow already executes on the
+# same head. The lift therefore exposes exactly the secrets those reviewed
+# pull_request jobs reference. Callers must keep that set empty for jobs that
+# execute dependency code; hey-cli and basecamp-cli were audited when this
+# landed (hey-cli: none; basecamp-cli: ANTHROPIC_API_KEY, in a job path-gated
+# to skills/ changes a Go bump never makes). The App token itself grants the
+# power every write-access member already has: the default branch is ruleset
+# protected and the App is not a bypass actor. No pull_request_target anywhere;
+# the head is Dependabot's own same-repo branch, and Dependabot-triggered runs
+# read the App key from the Dependabot secret store.
+#
+# Loop prevention: the pushed commit's pull_request run is actored by the App
+# bot, not dependabot[bot], so the guard below skips it. Nothing else is
+# pushed. `workflow_dispatch` with a PR number re-runs the refresh by hand
+# (and is how the caller was verified before it merged); the PR still has to
+# be an open, same-repo, Dependabot-authored one.
+#
+# Caller contract (thin caller in each repo):
+#   on:
+#     pull_request:
+#       paths: [go.mod, go.sum]
+#     workflow_dispatch:
+#       inputs: {pr: {description: Dependabot pull request number, required: true, type: string}}
+#   permissions: {}
+#   jobs:
+#     refresh:
+#       if: >-
+#         github.event_name == 'workflow_dispatch' ||
+#         (github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]')
+#       uses: basecamp/.github/.github/workflows/dependabot-sync-nix-vendor-hash.yml@<sha>
+#       with: {pr: "${{ inputs.pr }}", app-client-id: <the App's client id, a public literal>}
+#       permissions: {contents: read, pull-requests: read, actions: read}
+#       secrets: {app-private-key: "${{ secrets.RELEASE_APP_PRIVATE_KEY }}"}
+#   plus the App installed on the repository with contents: write, and its
+#   private key stored as a repository *Dependabot* secret (Dependabot-
+#   triggered runs see only Dependabot secrets) and, for the dispatch path,
+#   as a repository Actions secret. Environment-scoped copies (the CLIs'
+#   `release` environment) are out of reach here, by design; `vars` are not
+#   used because the CLIs keep the client id in that environment too.
+#
+# The refresh has to land before auto-merge can complete, and this workflow
+# cannot make that so on its own: GitHub auto-merge waits for required checks
+# only, and this build takes minutes. A caller does one of two things —
+#
+#   - keeps "Nix flake builds" a required status check (hey-cli): the stale
+#     head stays red until the push, and the App push, being a write-access
+#     actor's, leaves auto-merge enabled for the new head; or
+#   - sequences auto-merge after this workflow in one workflow file
+#     (basecamp-cli): the refresh job calls this workflow on every Dependabot
+#     PR (the changed-files boundary above makes non-Go bumps a no-op) and
+#     the auto-merge job `needs:` it, so `gh pr merge --auto` runs only once
+#     the hash is current or the push has landed, and never when the refresh
+#     failed. The caller then needs no `paths:` filter.
+#
+# A caller with neither merges a stale head whenever its required checks
+# finish first, as basecamp-cli #697 did; the push then lands on a closed
+# PR and main stays broken. Neither form holds the hash against a base whose
+# go.sum moves after the build; see the lease note above.
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: >-
+          Pull request number (workflow_dispatch only; pull_request events
+          carry their own).
+        required: false
+        default: ""
+        type: string
+      app-client-id:
+        description: Client ID of the GitHub App whose installation token pushes the commit
+        required: true
+        type: string
+      package-file:
+        description: The Nix file carrying the `vendorHash = "..."` line
+        required: false
+        default: nix/package.nix
+        type: string
+    secrets:
+      app-private-key:
+        description: Private key of the GitHub App named by app-client-id
+        required: true
+
+permissions: {}
+
+jobs:
+  compute:
+    name: Compute the vendorHash
+    runs-on: ubuntu-latest
+    # Belt and braces with the caller's own guard: this workflow does not
+    # trust a caller to have one. Dependabot must be both the actor of this
+    # run (so the App bot's own push does not loop back here) and the PR's
+    # author, and the head must live in this repository. Dispatch is for
+    # maintainers; the PR gate below still applies to it.
+    if: >- # zizmor: ignore[bot-conditions] -- dual check: actor validates the current trigger, user.login validates PR origin; on:pull_request (not pull_request_target), so GitHub sets the actor from who pushed
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.actor == 'dependabot[bot]' &&
+        github.event.pull_request.user.login == 'dependabot[bot]' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
+    # One run per PR; a newer head cancels the computation for the old one.
+    concurrency:
+      group: dependabot-sync-nix-vendor-hash-${{ github.event.pull_request.number || inputs.pr }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      head_ref: ${{ steps.pr.outputs.head_ref }}
+      hash: ${{ steps.build.outputs.hash }}
+    steps:
+      # Exactly one open, same-repo PR authored by the Dependabot app (gh
+      # reports it as app/dependabot — distinct from the dependabot[bot] actor
+      # checked above) whose changed files are a subset of go.mod, go.sum and
+      # the package file. Its head SHA is captured once here and is both what
+      # the build must correspond to and the push's compare-and-swap lease.
+      - name: Resolve the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          INPUT_PR: ${{ inputs.pr }}
+          PACKAGE_FILE: ${{ inputs.package-file }}
+        run: |
+          number="${EVENT_PR:-$INPUT_PR}"
+          if ! printf '%s' "$number" | grep -qE '^[0-9]+$'; then
+            echo "::error::no pull request number (event: '${EVENT_PR}', input: '${INPUT_PR}')"
+            exit 1
+          fi
+          pr="$(gh pr view "$number" --repo "$GITHUB_REPOSITORY" \
+            --json state,author,isCrossRepository,headRefOid,headRefName)"
+          state="$(jq -r '.state' <<<"$pr")"
+          author="$(jq -r '.author.login' <<<"$pr")"
+          cross="$(jq -r '.isCrossRepository' <<<"$pr")"
+          head_sha="$(jq -r '.headRefOid' <<<"$pr")"
+          head_ref="$(jq -r '.headRefName' <<<"$pr")"
+          if [ "$state" != "OPEN" ] || [ "$author" != "app/dependabot" ] || [ "$cross" != "false" ]; then
+            echo "::error::#${number} is not an open, same-repo, Dependabot-authored PR (state=${state}, author=${author}, cross=${cross})"
+            exit 1
+          fi
+          if ! printf '%s' "$head_sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::head SHA of #${number} is not a 40-hex commit id"
+            exit 1
+          fi
+
+          # Go bumps only, decided by the diff itself. A PR that changes
+          # neither go.mod nor go.sum — an actions or docker bump — is not
+          # this workflow's business and is a no-op, so a caller can sequence
+          # auto-merge after it on every Dependabot PR. A Go bump that also
+          # changes anything but go.mod, go.sum and the package file (the
+          # latter is this workflow's own earlier push, on a re-run) is
+          # refused whoever dispatched it: a mixed PR's workflow code must
+          # never re-run under the App actor.
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/files" --jq '.[].filename')"
+          if [ -z "$files" ]; then
+            echo "::error::#${number} reports no changed files"
+            exit 1
+          fi
+          go_bump=false
+          if printf '%s\n' "$files" | grep -qxE 'go\.(mod|sum)'; then
+            go_bump=true
+            outside="$(printf '%s\n' "$files" | grep -vxF -e go.mod -e go.sum -e "$PACKAGE_FILE" || true)"
+            if [ -n "$outside" ]; then
+              echo "::error::#${number} changes files other than go.mod, go.sum and ${PACKAGE_FILE}; not a Go-only bump, refusing to refresh"
+              printf '%s\n' "$outside"
+              exit 1
+            fi
+          else
+            echo "::notice::#${number} changes neither go.mod nor go.sum; not a Go bump, nothing to refresh"
+          fi
+          { echo "number=$number"; echo "head_sha=$head_sha"; echo "head_ref=$head_ref"; echo "go_bump=$go_bump"; } >> "$GITHUB_OUTPUT"
+
+      # The merge commit is what the caller's Nix check builds, so the hash
+      # computed here is the one that check will accept.
+      - name: Check out the merge commit
+        if: steps.pr.outputs.go_bump == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/merge
+          persist-credentials: false
+
+      # GitHub refreshes refs/pull/N/merge lazily; a head that moved since
+      # the PR was resolved above would be built against the wrong go.sum.
+      - name: Confirm the merge commit is for the captured head
+        if: steps.pr.outputs.go_bump == 'true'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          parents="$(git cat-file -p HEAD | awk '/^parent /{print $2}')"
+          if ! grep -qx "$HEAD_SHA" <<<"$parents"; then
+            echo "::error::merge commit $(git rev-parse HEAD) is not a merge of ${HEAD_SHA}; the head moved, a later run will pick it up"
+            exit 1
+          fi
+
+      - name: Install Nix
+        if: steps.pr.outputs.go_bump == 'true'
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+
+      # The classifier is embedded here so the caller's SHA pin on this
+      # reusable workflow covers it byte for byte — no runtime fetch, no
+      # mutable ref. scripts/extract-nix-vendor-hash.sh in basecamp/.github is
+      # the tested source of truth; CI fails if this embedded copy drifts from
+      # it (scripts/check-embedded-sync.sh).
+      - name: Materialize the trusted classifier
+        if: steps.pr.outputs.go_bump == 'true'
+        run: |
+          cat > "$RUNNER_TEMP/extract-nix-vendor-hash.sh" <<'EXTRACT_SH'
+          #!/usr/bin/env bash
+          # Extracts the corrected vendorHash from a nix build log.
+          #
+          # Usage: scripts/extract-nix-vendor-hash.sh [LOGFILE]   (reads stdin when omitted)
+          #
+          # The classifier for "did this build fail because of the vendorHash?" behind
+          # dependabot-sync-nix-vendor-hash.yml, which embeds it so the caller's SHA
+          # pin covers it byte for byte; CI fails if the embedded copy drifts from this
+          # file (scripts/check-embedded-sync.sh), and extract-nix-vendor-hash.test.mjs
+          # holds the fixtures that are its contract. Derived from hey-cli's script of
+          # the same name.
+          #
+          # Three conditions must hold before a hash comes back. Each guard is
+          # load-bearing, because the caller writes the result into a tracked file:
+          #
+          # - Nix must have reported a fixed-output hash mismatch. Matching a bare
+          #   `got:` is far too loose: any failing build whose log happens to contain
+          #   one — a Go test assertion printing `got: 42`, say — would yield "42" and
+          #   misreport an unrelated failure as a hash problem.
+          # - That mismatch must belong to buildGoModule's vendor derivation
+          #   (`*-go-modules.drv`). A flake can carry other fixed-output derivations —
+          #   hey-cli's once fetched a Go source tarball while nixpkgs lagged go.mod —
+          #   and their hashes must never land in vendorHash. The `got:` is taken from
+          #   that one diagnostic, so a mismatch for another derivation cannot supply
+          #   the value however the two are ordered.
+          # - The value must be a complete SRI sha256: 43 base64 characters and one
+          #   `=`. A truncated or otherwise malformed value is not a hash to write.
+          #
+          # Exit codes:
+          #   0 — a go-modules fixed-output hash mismatch was reported; the SRI hash is
+          #       on stdout
+          #   1 — the log reports no such mismatch, or its value is malformed; nothing
+          #       on stdout
+
+          set -euo pipefail
+
+          LOG=$(cat -- "${1:--}")
+
+          # The mismatch diagnostic names the derivation on its own line; `specified:`
+          # and `got:` follow on the next lines. Take the first `got:` inside the
+          # go-modules block and stop there; a mismatch for any other derivation ends
+          # the block, so its `got:` can never be read as ours. (No interval regexes:
+          # Ubuntu's awk is mawk. The length check is grep's, below.)
+          HASH=$(awk '
+            /hash mismatch in fixed-output derivation .*-go-modules\.drv/ { in_block = 1; next }
+            /hash mismatch in fixed-output derivation/ { in_block = 0; next }
+            in_block && /got:/ {
+              if (match($0, /sha256-[A-Za-z0-9+\/]+=*/)) { print substr($0, RSTART, RLENGTH) }
+              exit
+            }
+          ' <<<"$LOG")
+
+          if ! printf '%s' "$HASH" | grep -qE '^sha256-[A-Za-z0-9+/]{43}=$'; then
+            exit 1
+          fi
+
+          printf '%s\n' "$HASH"
+          EXTRACT_SH
+
+      # Exit paths, all explicit: a build that succeeds means the hash is
+      # current and there is nothing to do; a go-modules fixed-output mismatch
+      # yields the hash; anything else fails here with Nix's own diagnostics
+      # and nothing downstream runs.
+      - name: Build the flake and classify the failure
+        if: steps.pr.outputs.go_bump == 'true'
+        id: build
+        run: |
+          log="$(mktemp)"
+          status=0
+          nix build --no-link 2>"$log" || status=$?
+          cat "$log" >&2
+          if [ "$status" -eq 0 ]; then
+            echo "::notice::the flake builds; vendorHash is current"
+            exit 0
+          fi
+          if ! hash="$(bash "$RUNNER_TEMP/extract-nix-vendor-hash.sh" "$log")"; then
+            echo "::error::nix build failed, and not because of the vendorHash; nothing to refresh"
+            exit "$status"
+          fi
+          echo "::notice::stale vendorHash; nix computed ${hash}"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+  push:
+    name: Commit the refreshed vendorHash
+    runs-on: ubuntu-latest
+    needs: compute
+    if: needs.compute.outputs.hash != ''
+    permissions:
+      contents: read # read the package file at the captured head; the write goes through the App token
+      actions: read # confirm pull_request CI started on the pushed commit
+    steps:
+      - name: Mint a push token for this repository
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      # The file is taken from the captured head, not a checkout, and the
+      # commit is created server-side against that exact head: the runner
+      # holds no clone and no credential beyond the token in this step's env.
+      - name: Rewrite the vendorHash line and commit it behind a lease
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ needs.compute.outputs.number }}
+          HEAD_SHA: ${{ needs.compute.outputs.head_sha }}
+          HEAD_REF: ${{ needs.compute.outputs.head_ref }}
+          NEW_HASH: ${{ needs.compute.outputs.hash }}
+          PACKAGE_FILE: ${{ inputs.package-file }}
+        run: |
+          old="$RUNNER_TEMP/package.nix.old"
+          new="$RUNNER_TEMP/package.nix.new"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/${PACKAGE_FILE}?ref=${HEAD_SHA}" --jq '.content' | base64 -d > "$old"
+
+          line_re='^[[:space:]]*vendorHash = "sha256-[A-Za-z0-9+/]{43}=";[[:space:]]*$'
+          if [ "$(grep -cE "$line_re" "$old")" != "1" ]; then
+            echo "::error::${PACKAGE_FILE} does not carry exactly one vendorHash line"
+            exit 1
+          fi
+          old_hash="$(sed -nE 's/^[[:space:]]*vendorHash = "([^"]*)";[[:space:]]*$/\1/p' "$old")"
+          if [ "$old_hash" = "$NEW_HASH" ]; then
+            echo "::notice::${PACKAGE_FILE} already carries ${NEW_HASH}; nothing to commit"
+            exit 0
+          fi
+
+          # The grep above already proved the line's shape; here only the
+          # quoted value is swapped (no interval regexes — Ubuntu's awk is mawk).
+          awk -v new="$NEW_HASH" '
+            !done && /^[[:space:]]*vendorHash = "[^"]*";[[:space:]]*$/ {
+              sub(/"[^"]*"/, "\"" new "\"")
+              done = 1
+            }
+            { print }
+          ' "$old" > "$new"
+
+          # Prove the change is that one line: the diff has exactly one
+          # removed and one added line, and both are vendorHash lines.
+          changed="$(diff "$old" "$new" | grep -E '^[<>]' || true)"
+          if [ "$(printf '%s\n' "$changed" | wc -l | tr -d ' ')" != "2" ] || \
+             printf '%s\n' "$changed" | sed -E 's/^[<>] //' | grep -qvE "$line_re"; then
+            echo "::error::rewrite changed something other than the vendorHash line; refusing to commit"
+            printf '%s\n' "$changed"
+            exit 1
+          fi
+
+          # createCommitOnBranch with expectedHeadOid is the lease: the commit
+          # lands only if the branch still points at the head the hash was
+          # computed for. GitHub signs commits created this way and attributes
+          # them to the App.
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$HEAD_REF" \
+            --arg head "$HEAD_SHA" \
+            --arg path "$PACKAGE_FILE" \
+            --arg contents "$(base64 -w0 "$new")" \
+            --arg headline "Refresh the Nix vendorHash for the Go dependency bump" \
+            --arg body "go.sum changed in #${PR}, so buildGoModule's fixed-output hash over the vendored modules moved from ${old_hash} to ${NEW_HASH}. Computed by nix build at the merge of ${HEAD_SHA}; this PR's own Nix flake check verifies it." \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+              variables: { input: {
+                branch: { repositoryNameWithOwner: $repo, branchName: $branch },
+                expectedHeadOid: $head,
+                message: { headline: $headline, body: $body },
+                fileChanges: { additions: [ { path: $path, contents: $contents } ] }
+              } }
+            }' > "$RUNNER_TEMP/commit.json"
+          result="$(GH_TOKEN="$APP_TOKEN" gh api graphql --input "$RUNNER_TEMP/commit.json")"
+          oid="$(jq -r '.data.createCommitOnBranch.commit.oid' <<<"$result")"
+          if ! printf '%s' "$oid" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::commit was not created: ${result}"
+            exit 1
+          fi
+          echo "::notice::pushed $(jq -r '.data.createCommitOnBranch.commit.url' <<<"$result") onto ${HEAD_REF}"
+          echo "oid=$oid" >> "$GITHUB_OUTPUT"
+
+      # An App push fires pull_request synchronize on its own; confirm it did
+      # so the run log carries the proof. There is deliberately no dispatch
+      # fallback: dispatching the branch's workflows would run them outside
+      # the pull_request context with whatever permissions they declare.
+      - name: Confirm pull_request CI started on the pushed commit
+        if: steps.commit.outputs.oid != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_HEAD: ${{ steps.commit.outputs.oid }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            count="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" \
+              -f event=pull_request -f head_sha="$NEW_HEAD" -f per_page=100 \
+              --jq '.workflow_runs | length')"
+            if [ "${count:-0}" -gt 0 ]; then
+              echo "::notice::${count} pull_request workflow run(s) started for ${NEW_HEAD}"
+              exit 0
+            fi
+            [ "$attempt" = "6" ] || sleep 10
+          done
+          echo "::warning::no pull_request run appeared for ${NEW_HEAD} within a minute; check the PR's checks tab"

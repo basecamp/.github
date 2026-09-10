@@ -41,5 +41,5 @@ jobs:
         # versions with built-in --test glob support.
         run: node --test scripts/*.test.mjs
 
-      - name: Check embedded updater script matches source
+      - name: Check embedded scripts match their sources
         run: bash scripts/check-embedded-sync.sh
