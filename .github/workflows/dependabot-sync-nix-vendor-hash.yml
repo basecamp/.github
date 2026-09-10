@@ -11,12 +11,13 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #
 # Two jobs, deliberately on separate runners:
 #
-#   compute  contents: read, no secrets. Refuses any PR whose changed files
-#            are not a subset of go.mod, go.sum and the package file — the
-#            "Go bumps only" boundary is enforced here, on the PR's actual
-#            diff, not by the caller's path filter or by who dispatched the
-#            run — and does nothing for a PR that touches neither go.mod nor
-#            go.sum. Otherwise builds the flake at the PR's merge commit — the
+#   compute  contents: read, no secrets. Does nothing for a PR that touches
+#            neither go.mod nor go.sum (an actions or docker bump), and
+#            refuses a Go bump whose changed files are not a subset of go.mod,
+#            go.sum and the package file — the "Go bumps only" boundary is
+#            enforced here, on the PR's actual diff, not by the caller's path
+#            filter or by who dispatched the run. Otherwise builds the flake
+#            at the PR's merge commit — the
 #            same thing the Nix check builds — and, only when Nix reports a
 #            fixed-output mismatch for the `*-go-modules.drv` derivation,
 #            takes the SRI hash from that diagnostic's `got:` line. A build
@@ -35,11 +36,17 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #            Dependabot rebase mid-run makes the commit fail cleanly and the
 #            rebase's own run recomputes. No git credential ever touches a
 #            runner; the token exists only in this job, which runs no build.
-#            The lease covers the head only: a base branch whose go.sum moves
-#            after the build leaves this PR's checks exactly where any PR's
-#            are after its base moves — run at the merge commit of their
-#            moment — and the caller's required check, not this push, is
-#            what holds that.
+#            The lease covers the head only. A base whose go.sum moves after
+#            the build — during it or, far more often, after this PR's checks
+#            have all run, as when two Go bumps merge on the same day — yields
+#            a hash for the old merge. That is the exposure every PR's checks
+#            have to a moving base, and no pull_request-time control holds
+#            it: required checks are not re-run when the base moves (neither
+#            caller requires up-to-date branches), and recomputing on this
+#            workflow's own push would cover only the minutes of the build.
+#            The caller's Nix job on the default branch reports it after the
+#            merge; closing it is a post-merge repair on main, the
+#            sync-actions-comments pattern, which is follow-up work.
 #
 # Why an App token: a GITHUB_TOKEN push does not re-trigger pull_request
 # workflows, so the required checks would never report on the new head and the
@@ -112,8 +119,8 @@ name: Refresh the Nix vendorHash on Dependabot PRs
 #
 # A caller with neither merges a stale head whenever its required checks
 # finish first, as basecamp-cli #697 did; the push then lands on a closed
-# PR and main stays broken. The required check is also the only thing that
-# holds the hash against a base branch whose go.sum moves after the push.
+# PR and main stays broken. Neither form holds the hash against a base whose
+# go.sum moves after the build; see the lease note above.
 
 on:
   workflow_call:
@@ -206,27 +213,29 @@ jobs:
           fi
 
           # Go bumps only, decided by the diff itself. A PR that changes
-          # anything but go.mod, go.sum and the package file (the latter is
-          # this workflow's own earlier push, on a re-run) is refused whoever
-          # dispatched it: an actions bump's workflow code must never re-run
-          # under the App actor. One that changes neither go.mod nor go.sum
-          # has nothing to refresh and the build is skipped.
+          # neither go.mod nor go.sum — an actions or docker bump — is not
+          # this workflow's business and is a no-op, so a caller can sequence
+          # auto-merge after it on every Dependabot PR. A Go bump that also
+          # changes anything but go.mod, go.sum and the package file (the
+          # latter is this workflow's own earlier push, on a re-run) is
+          # refused whoever dispatched it: a mixed PR's workflow code must
+          # never re-run under the App actor.
           files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/files" --jq '.[].filename')"
           if [ -z "$files" ]; then
             echo "::error::#${number} reports no changed files"
             exit 1
           fi
-          outside="$(printf '%s\n' "$files" | grep -vxF -e go.mod -e go.sum -e "$PACKAGE_FILE" || true)"
-          if [ -n "$outside" ]; then
-            echo "::error::#${number} changes files other than go.mod, go.sum and ${PACKAGE_FILE}; not a Go-only bump, refusing to refresh"
-            printf '%s\n' "$outside"
-            exit 1
-          fi
           go_bump=false
           if printf '%s\n' "$files" | grep -qxE 'go\.(mod|sum)'; then
             go_bump=true
+            outside="$(printf '%s\n' "$files" | grep -vxF -e go.mod -e go.sum -e "$PACKAGE_FILE" || true)"
+            if [ -n "$outside" ]; then
+              echo "::error::#${number} changes files other than go.mod, go.sum and ${PACKAGE_FILE}; not a Go-only bump, refusing to refresh"
+              printf '%s\n' "$outside"
+              exit 1
+            fi
           else
-            echo "::notice::#${number} changes neither go.mod nor go.sum; nothing to refresh"
+            echo "::notice::#${number} changes neither go.mod nor go.sum; not a Go bump, nothing to refresh"
           fi
           { echo "number=$number"; echo "head_sha=$head_sha"; echo "head_ref=$head_ref"; echo "go_bump=$go_bump"; } >> "$GITHUB_OUTPUT"
 
