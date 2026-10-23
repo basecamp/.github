@@ -263,7 +263,7 @@ jobs:
 
       - name: Install Nix
         if: steps.pr.outputs.go_bump == 'true'
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
 
       # The classifier is embedded here so the caller's SHA pin on this
       # reusable workflow covers it byte for byte — no runtime fetch, no
@@ -367,7 +367,7 @@ jobs:
     steps:
       - name: Mint a push token for this repository
         id: token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app-client-id }}
           private-key: ${{ secrets.app-private-key }}
