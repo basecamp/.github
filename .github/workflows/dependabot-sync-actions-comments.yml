@@ -37,9 +37,12 @@ name: Sync Dependabot action pin comments
 #       permissions: {contents: write, actions: write, pull-requests: write}
 #       secrets: inherit
 #   plus the `dependabot-sync` environment (deployment branches: default
-#   branch only) holding SYNC_ACTIONS_DEPLOY_KEY, and the repository setting
-#   "Allow GitHub Actions to create and approve pull requests" enabled so the
-#   job token can open the repair PR.
+#   branch only) holding SYNC_ACTIONS_DEPLOY_KEY, and the org's PR bot App
+#   installed on the caller repo, with the org variable PR_BOT_CLIENT_ID and
+#   the org Actions secret PR_BOT_PRIVATE_KEY shared with it (`secrets:
+#   inherit` passes the secret through). The org doesn't let Actions create
+#   pull requests, so the repair PR is opened with a short-lived App token
+#   scoped to the caller repo and to pull requests only.
 
 on:
   workflow_call:
@@ -496,6 +499,22 @@ jobs:
             exit 1
           fi
 
+      # Opens the repair PR: the org doesn't let GITHUB_TOKEN create one. The
+      # token is scoped to this repository and to pull requests only. The
+      # branch push still uses the deploy key, and arming auto-merge still
+      # uses GITHUB_TOKEN. Minted before the push step, which checks an open
+      # repair PR's author against this App's slug.
+      - name: Mint the PR bot token
+        if: steps.sync.outputs.changed == 'true'
+        id: pr-bot
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PR_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.PR_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+
       # Successor-commit invariant, part 2 (topology): the repair commit's
       # parent is exactly the captured base SHA (guaranteed by committing on
       # the detached base checkout, asserted anyway), and there is at most one
@@ -508,6 +527,7 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           BASE_BRANCH: ${{ inputs.default-branch }}
           DEPLOY_KEY: ${{ secrets.SYNC_ACTIONS_DEPLOY_KEY }}
+          PR_BOT_SLUG: ${{ steps.pr-bot.outputs.app-slug }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -530,8 +550,10 @@ jobs:
           if [ "$count" = "1" ]; then
             author="$(jq -r '.[0].author.login' <<<"$prs")"
             base="$(jq -r '.[0].baseRefName' <<<"$prs")"
-            # gh reports bot PR creators as app/<slug>
-            if [ "$author" != "app/github-actions" ] || [ "$base" != "$BASE_BRANCH" ]; then
+            # gh reports bot PR creators as app/<slug>. app/github-actions is
+            # a repair PR opened before the org stopped Actions creating PRs;
+            # drop it once none is left open.
+            if { [ "$author" != "app/${PR_BOT_SLUG}" ] && [ "$author" != "app/github-actions" ]; } || [ "$base" != "$BASE_BRANCH" ]; then
               echo "::error::existing ${REPAIR_BRANCH} PR is not the bot-owned repair PR (author=${author}, base=${base}); refusing to touch it"
               exit 1
             fi
@@ -572,9 +594,11 @@ jobs:
           BASE_BRANCH: ${{ inputs.default-branch }}
           NEW_HEAD: ${{ steps.push.outputs.new_head }}
           EXISTING_PR: ${{ steps.push.outputs.pr }}
+          PR_BOT_SLUG: ${{ steps.pr-bot.outputs.app-slug }}
+          PR_BOT_TOKEN: ${{ steps.pr-bot.outputs.token }}
         run: |
           if [ -z "$EXISTING_PR" ]; then
-            gh pr create --repo "$GITHUB_REPOSITORY" \
+            GH_TOKEN="$PR_BOT_TOKEN" gh pr create --repo "$GITHUB_REPOSITORY" \
               --head "$REPAIR_BRANCH" --base "$BASE_BRANCH" \
               --title "Sync action pin comments" \
               --body "Automated comment-only repair: version comments on SHA-pinned \`uses:\` lines drifted from the tags their pins point at. Every action path and pin is byte-identical to the base commit — only comment tokens changed — so CI for this PR executes exactly the action versions already reviewed on \`${BASE_BRANCH}\`. Auto-merges once required checks pass."
@@ -598,7 +622,7 @@ jobs:
           base="$(jq -r '.[0].baseRefName' <<<"$prs")"
           author="$(jq -r '.[0].author.login' <<<"$prs")"
           num="$(jq -r '.[0].number' <<<"$prs")"
-          if [ "$oid" != "$NEW_HEAD" ] || [ "$base" != "$BASE_BRANCH" ] || [ "$author" != "app/github-actions" ]; then
+          if [ "$oid" != "$NEW_HEAD" ] || [ "$base" != "$BASE_BRANCH" ] || { [ "$author" != "app/${PR_BOT_SLUG}" ] && [ "$author" != "app/github-actions" ]; }; then
             echo "::error::repair PR does not match the proven commit (head=${oid}, base=${base}, author=${author}); not arming auto-merge"
             exit 1
           fi
@@ -606,8 +630,11 @@ jobs:
           gh pr merge --repo "$GITHUB_REPOSITORY" --auto --squash "$num"
           echo "::notice::repair PR #${num} armed for auto-merge at ${NEW_HEAD}"
 
-      # GITHUB_TOKEN-created PRs get their workflow runs held for approval.
-      # Approve held runs for the exact repair head, and only those.
+      # GITHUB_TOKEN-created PRs got their workflow runs held for approval. A
+      # PR the App opens should start its runs unheld, leaving this step
+      # nothing to do; it stays until a repair PR shows that, then goes with
+      # the callers' `actions: write`. It approves held runs for the exact
+      # repair head, and only those.
       - name: Approve held runs for the repair head
         if: steps.sync.outputs.changed == 'true'
         env:
